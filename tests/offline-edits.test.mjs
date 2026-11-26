@@ -1,0 +1,27 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {validateDemoPage} from '../www/native-api.js';
+import {beginEdit,reviseEdit,compareBase,sealEdit,openEdit,createEditStore} from '../www/offline-edits.js';
+const page=JSON.parse(readFileSync(new URL('./fixture-r33-page.json',import.meta.url)));
+const snapshot=validateDemoPage(page), id='demo-001', pass='demo-test-password';
+const base=beginEdit(snapshot,id), edit=reviseEdit(base,'2027-01-15','ghi chu DEMO');
+const fixture=await sealEdit(pass,edit);
+function memory(){const m=new Map();return {m,read:async k=>m.get(k),write:async(k,v)=>m.set(k,v),remove:async k=>m.delete(k),keys:async()=>[...m.keys()]};}
+test('uses actual downloaded base revision and due',()=>{assert.equal(base.baseRevision,snapshot.revision);assert.equal(base.baseServerEpoch,snapshot.serverEpoch);assert.equal(base.baseDue,snapshot.items.find(v=>v.id===id).inspectionDue);assert.equal(base.editedDue,base.baseDue)});
+test('only allowed fields change',()=>{assert.equal(edit.baseDue,base.baseDue);assert.equal(edit.editedDue,'2027-01-15');assert.equal(base.note,'')});
+test('rejects unknown ID',()=>assert.throws(()=>beginEdit(snapshot,'real-001')));
+test('rejects invalid snapshot',()=>assert.throws(()=>beginEdit({...snapshot,items:[]},id)));
+test('rejects invalid date',()=>assert.throws(()=>reviseEdit(base,'2027-02-30','')));
+test('supports empty due',()=>assert.equal(reviseEdit(base,'','').editedDue,''));
+test('rejects extra fields and oversized notes',()=>{assert.throws(()=>reviseEdit({...base,plate:'other'},'',''));assert.throws(()=>reviseEdit(base,'','x'.repeat(1001)))});
+test('detects changed revision and epoch',()=>{assert.equal(compareBase(base,snapshot),true);assert.equal(compareBase(base,{...snapshot,revision:snapshot.revision+1}),false);assert.equal(compareBase(base,{...snapshot,serverEpoch:'changed-epoch'}),false)});
+test('encrypted round trip',async()=>assert.deepEqual(await openEdit(pass,id,fixture),edit));
+test('no plaintext in storage envelope',()=>{assert.ok(!JSON.stringify(fixture).includes(edit.note));assert.ok(!JSON.stringify(fixture).includes(edit.editedDue));assert.ok(!JSON.stringify(fixture).includes(pass))});
+test('different salts and IVs',async()=>{const r=await sealEdit(pass,edit);assert.notEqual(r.iv,fixture.iv);assert.notEqual(r.salt,fixture.salt)});
+test('wrong password, wrong ID, corrupted data rejected',async()=>{await assert.rejects(openEdit('different-password',id,fixture));await assert.rejects(openEdit(pass,'demo-002',fixture));await assert.rejects(openEdit(pass,id,{...fixture,data:'AAAA'}))});
+test('independent encrypted keys, reopen after new instance',async()=>{const m=memory();m.m.set('DEMO-001',{old:true});m.m.set('r471:server-snapshot',{snapshot:true});await createEditStore(m).save(pass,base,edit);const s=createEditStore(m);assert.deepEqual(await s.list(),[id]);assert.deepEqual(await s.load(pass,id),edit);assert.deepEqual(m.m.get('DEMO-001'),{old:true});assert.deepEqual(m.m.get('r471:server-snapshot'),{snapshot:true})});
+test('no overwrite unless existing draft opened with same password',async()=>{const m=memory(),s=createEditStore(m);await s.save(pass,base,edit);await assert.rejects(s.save(pass,base,edit));await assert.rejects(s.save('different-password',edit,reviseEdit(edit,'','x'),{existing:true}));assert.deepEqual(await s.load(pass,id),edit)});
+test('preserve original revision and reject stale update',async()=>{const s=createEditStore(memory());await s.save(pass,base,edit);await assert.rejects(s.save(pass,edit,{...edit,baseRevision:edit.baseRevision+1},{existing:true}));const next=reviseEdit(edit,'2027-02-02','new');await s.save(pass,edit,next,{existing:true});await assert.rejects(s.save(pass,edit,reviseEdit(edit,'','stale'),{existing:true}));assert.deepEqual(await s.load(pass,id),next)});
+test('delete requires valid password and does not recreate stale edit',async()=>{const s=createEditStore(memory());await s.save(pass,base,edit);await assert.rejects(s.remove('different-password',id));await s.remove(pass,id);assert.deepEqual(await s.list(),[]);await assert.rejects(s.save(pass,edit,edit,{existing:true}))});
+test('store failure is not acknowledged',async()=>{const m=memory();m.write=async()=>{throw Error('disk error')};const s=createEditStore(m);await assert.rejects(s.save(pass,base,edit));assert.deepEqual(await s.list(),[])});

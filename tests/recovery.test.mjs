@@ -1,0 +1,19 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {validateDemoPage} from '../www/native-api.js';
+import {beginEdit,reviseEdit,createEditStore} from '../www/offline-edits.js';
+import {draftPayload,submitDraft} from '../www/native-sync.js';
+const s=validateDemoPage(JSON.parse(readFileSync(new URL('./fixture-r33-page.json',import.meta.url))));
+const base=beginEdit(s,'demo-001'),d=reviseEdit(base,'2027-03-01','local only'),pw='test-password-123';
+function mem(){const m=new Map();return {m,read:async k=>m.get(k),write:async(k,v)=>m.set(k,v),remove:async k=>m.delete(k),keys:async()=>[...m.keys()]};}
+async function fixture(){const m=mem(),store=createEditStore(m);await store.save(pw,base,d);return {m,store};}
+test('durable pending, restart and same operation ID',async()=>{const {m,store}=await fixture();await store.markPending(pw,d);const after=createEditStore(m);assert.equal(await after.pending(pw,d.id),true);assert.deepEqual(await draftPayload(await after.load(pw,d.id)),await draftPayload(d));await after.markPending(pw,d);assert.ok(!JSON.stringify([...m.m.values()]).includes('local only'));});
+test('pending protects edit, deletion and rebase',async()=>{const {store}=await fixture();await store.markPending(pw,d);await assert.rejects(store.save(pw,d,reviseEdit(d,'2028-01-01',''),{existing:true}));await assert.rejects(store.remove(pw,d.id));await assert.rejects(store.rebase(pw,d,s,'draft'));assert.deepEqual(await store.load(pw,d.id),d);});
+test('lost HTTP response and duplicate acknowledgement',async()=>{const {m,store}=await fixture();await store.markPending(pw,d);let committed=null, writes=0;const client={authenticated:true,send:async(r,m,b)=>{if(!committed){committed=b;writes++;throw Error('lost response');}assert.deepEqual(b,committed);return {ok:true,operation_id:b.operation_id,vehicle_id:b.vehicle_id,revision:b.base_revision+1,inspectionDue:b.new_due,duplicate_ack:true};}};await assert.rejects(submitDraft(client,d));const after=createEditStore(m);assert.equal(await after.pending(pw,d.id),true);const draft=await after.load(pw,d.id);assert.equal((await submitDraft(client,draft)).duplicate_ack,true);await after.confirm(pw,draft);assert.equal(await after.pending(pw,d.id),false);assert.equal(await after.confirmed(pw,d.id),true);assert.equal(writes,1);});
+test('failed pending persistence never gives successful mark',async()=>{const {m,store}=await fixture();m.write=async()=>{throw Error('disk');};await assert.rejects(store.markPending(pw,d));assert.equal(await store.pending(pw,d.id),false);assert.deepEqual(await store.load(pw,d.id),d);});
+test('failed confirmation persistence retains pending after restart',async()=>{const {m,store}=await fixture();await store.markPending(pw,d);m.write=async()=>{throw Error('disk');};await assert.rejects(store.confirm(pw,d));const after=createEditStore(m);assert.equal(await after.pending(pw,d.id),true);assert.equal(await after.confirmed(pw,d.id),false);});
+test('definitive rejection releases pending without changing draft',async()=>{const {store}=await fixture();await store.markPending(pw,d);await store.releaseRejected(pw,d);assert.equal(await store.pending(pw,d.id),false);assert.deepEqual(await store.load(pw,d.id),d);});
+test('wrong password and swapped marker fail closed',async()=>{const {m,store}=await fixture();await store.markPending(pw,d);await assert.rejects(store.pending('incorrect-password',d.id));const [k,v]=[...m.m.entries()][0];m.m.set(k,{...v,pending:v});await assert.rejects(store.pending(pw,d.id));await assert.rejects(store.markPending(pw,d));await assert.rejects(store.confirm(pw,d));});
+
+test('no-op never creates pending marker',async()=>{const m=mem(),store=createEditStore(m);await store.save(pw,base,base);await assert.rejects(store.markPending(pw,base));assert.equal(await store.pending(pw,base.id),false);});

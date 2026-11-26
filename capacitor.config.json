@@ -1,0 +1,9 @@
+{
+  "appId": "vn.dkp.demo.capacitor.r44",
+  "appName": "Dang Kiem Xe Pro DEMO",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "ios": {
+    "contentInset": "never"
+  }
+}

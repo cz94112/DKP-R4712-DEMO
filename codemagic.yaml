@@ -1,0 +1,125 @@
+# R4.7.12: THREE MANUAL WORKFLOWS. No publishing, no external upload of sensitive data.
+# Demo bundle identifier ONLY. Change it in capacitor.config.json AND this file
+# to match the real, user-owned Apple provisioning profile before signed build.
+workflows:
+  r46-ios-compile-check:
+    name: R4.7.12 DEMO - macOS iOS simulator compile (UNSIGNED)
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+    environment:
+      node: 22
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Preflight and offline source checks
+        script: |
+          python3 tools/r46_preflight.py --check
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          node --test tests/*.test.mjs
+      - name: Create native iOS project on Codemagic macOS
+        script: |
+          npm install --no-audit --no-fund
+          npx cap add ios --packagemanager CocoaPods
+          npx cap sync ios
+          ruby tools/install_native_vault.rb
+          cd ios/App && pod install
+      - name: Compile for simulator without signing or exporting IPA
+        script: |
+          xcodebuild -workspace ios/App/App.xcworkspace \
+            -scheme App -configuration Debug -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO build
+    artifacts:
+      - /tmp/xcodebuild_logs/*.log
+
+  r46-ios-ad-hoc-signed-manual:
+    name: R4.7.12 DEMO - iPhone Ad Hoc signed IPA (MANUAL gated)
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+    environment:
+      node: 22
+      xcode: latest
+      cocoapods: default
+      ios_signing:
+        distribution_type: ad_hoc
+        bundle_identifier: vn.dkp.demo.capacitor.r44
+      vars:
+        XCODE_SCHEME: App
+    scripts:
+      - name: Gate signing - requires explicit approval in Codemagic UI
+        script: |
+          python3 tools/r46_preflight.py --guard-signed
+          python3 tools/r46_preflight.py --check
+          node --test tests/*.test.mjs
+      - name: Prepare native iOS project
+        script: |
+          npm install --no-audit --no-fund
+          npx cap add ios --packagemanager CocoaPods
+          npx cap sync ios
+          ruby tools/install_native_vault.rb
+          cd ios/App && pod install
+      - name: Apply matching Apple signing profiles stored in Codemagic
+        script: xcode-project use-profiles
+      - name: Build signed Ad Hoc IPA (no auto distribution)
+        script: |
+          cd ios/App
+          xcode-project build-ipa --workspace App.xcworkspace --scheme "$XCODE_SCHEME"
+    artifacts:
+      - ios/App/build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+
+  r4712-ios-device-unsigned:
+    name: R4.7.12 DEMO - iPhone device unsigned IPA
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+    environment:
+      node: 22
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Source safety and regression tests
+        script: |
+          python3 tools/r46_preflight.py --check
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          node --test tests/*.test.mjs
+      - name: Prepare native iOS project
+        script: |
+          npm install --no-audit --no-fund
+          npx cap add ios --packagemanager CocoaPods
+          npx cap sync ios
+          ruby tools/install_native_vault.rb
+          cd ios/App && pod install
+      - name: Build unsigned device app and package IPA
+        script: |
+          set -euo pipefail
+          xcodebuild -workspace ios/App/App.xcworkspace -scheme App -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$CM_BUILD_DIR/build/r4712" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+          APP="$CM_BUILD_DIR/build/r4712/Build/Products/Release-iphoneos/App.app"
+          test -f "$APP/Info.plist"
+          test -f "$APP/public/native-api.js"
+          cmp "$APP/public/native-api.js" www/native-api.js
+          cmp "$APP/public/native-sync.js" www/native-sync.js
+          cmp "$APP/public/auto-sync.js" www/auto-sync.js
+          cmp "$APP/public/auto-batch.js" www/auto-batch.js
+          cmp "$APP/public/snapshot-cache.js" www/snapshot-cache.js
+          cmp "$APP/public/offline-edits.js" www/offline-edits.js
+          cmp "$APP/public/offline-edit-ui.js" www/offline-edit-ui.js
+          cmp "$APP/public/batch-sync.js" www/batch-sync.js
+          cmp "$APP/public/device-vault.js" www/device-vault.js
+          cmp "$APP/public/remember-session.js" www/remember-session.js
+          cmp "$APP/public/legacy-migration.js" www/legacy-migration.js
+          cmp "$APP/public/layout-ui.js" www/layout-ui.js
+          cmp "$APP/public/index.html" www/index.html
+          cmp "$APP/public/style.css" www/style.css
+          mkdir -p "$CM_BUILD_DIR/dist"
+          rm -rf "$CM_BUILD_DIR/dist/Payload"
+          mkdir -p "$CM_BUILD_DIR/dist/Payload"
+          ditto "$APP" "$CM_BUILD_DIR/dist/Payload/App.app"
+          cd "$CM_BUILD_DIR/dist"
+          ditto -c -k --keepParent Payload DKP_R4712_DEMO_UNSIGNED.ipa
+          unzip -t DKP_R4712_DEMO_UNSIGNED.ipa
+          python3 "$CM_BUILD_DIR/tools/verify_ipa.py" "$CM_BUILD_DIR/dist/DKP_R4712_DEMO_UNSIGNED.ipa"
+          shasum -a 256 DKP_R4712_DEMO_UNSIGNED.ipa > SHA256_R4712.txt
+    artifacts:
+      - dist/DKP_R4712_DEMO_UNSIGNED.ipa
+      - dist/SHA256_R4712.txt
+      - /tmp/xcodebuild_logs/*.log
